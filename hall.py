@@ -35,9 +35,9 @@ PRESETS = {
                        (["lshift"], 0.3, 0.1), (["lctrl", "c"], 0.4, 0.1), (list("123456qzr"), 2.0, None)],
     # NetEase's own Marvel Rivals guidance (relayed by Razer)
     "rivals": lambda a: [("wasd", 1.0, 0.2), (["space", "lctrl", "lshift"], 2.0, None)],
-    # Wooting / DrunkDeer Valorant guidance: movement fast, crouch/jump/abilities deeper
-    "valorant": lambda a: [("wasd", 0.3, 0.2), (["lshift"], 0.5, None), (["lctrl"], 0.8, None),
-                           (["space"], 2.0, None), (list("cqe"), 1.2, None), (["x"], 1.8, None)],
+    # Wooting's current Valorant starting ranges: responsive movement, deliberate utility/jump keys.
+    "valorant": lambda a: [("wasd", 0.3, 0.3), (["lshift"], 1.0, None), (["lctrl"], 0.7, None),
+                           (["space"], 2.0, None), (list("cqe"), 1.5, None), (["x"], 2.2, None)],
 }
 
 
