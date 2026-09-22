@@ -23,6 +23,12 @@ class ProfileMonitorTests(unittest.TestCase):
 
         self.assertEqual([profile.id for profile in self.applied], ["apex"])
 
+    def test_monitor_applies_desktop_when_started_without_a_linked_game(self):
+        """Turning on auto-switch must restore the work/lounge profile if no game is running."""
+        self.monitor.tick(ProcessSnapshot({"discord.exe"}, "discord.exe"))
+
+        self.assertEqual([profile.id for profile in self.applied], ["desktop"])
+
 
 if __name__ == "__main__":
     unittest.main()

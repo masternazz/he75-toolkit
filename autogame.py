@@ -26,13 +26,13 @@ class ProfileMonitor:
 
     def __init__(self, profiles, *, apply):
         self.profiles = list(profiles)
-        desktop = next(profile for profile in self.profiles if profile.kind == "desktop")
-        self.state = SwitchState(desktop.id, None)
+        self.state = None
         self.apply = apply
 
     def tick(self, snapshot: ProcessSnapshot | None = None):
-        next_state = resolve(snapshot or snapshot_windows(), self.profiles, self.state)
-        if next_state.active_id == self.state.active_id:
+        current = self.state or SwitchState("", None)
+        next_state = resolve(snapshot or snapshot_windows(), self.profiles, current)
+        if self.state and next_state.active_id == self.state.active_id:
             self.state = next_state
             return None
         self.state = next_state
