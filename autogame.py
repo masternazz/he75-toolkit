@@ -10,6 +10,8 @@ Applying a preset takes ~2 minutes (every key is written then verified), so it h
 import argparse, csv, io, subprocess, sys, threading, time
 
 import hall, winhid
+from profiles import Profile
+from switcher import ProcessSnapshot, SwitchState, resolve, snapshot_windows
 
 GAMES = {   # process name (lowercase) -> preset. Check Task Manager > Details for yours; add more with --map.
     "r5apex.exe": "apex", "r5apex_dx12.exe": "apex",
@@ -17,6 +19,25 @@ GAMES = {   # process name (lowercase) -> preset. Check Task Manager > Details f
     "valorant-win64-shipping.exe": "valorant",
 }
 DEVICE_LOCK = threading.Lock()   # one HID handle at a time (the GUI shares this)
+
+
+class ProfileMonitor:
+    """Apply a saved profile only when focus/running-process resolution changes."""
+
+    def __init__(self, profiles, *, apply):
+        self.profiles = list(profiles)
+        desktop = next(profile for profile in self.profiles if profile.kind == "desktop")
+        self.state = SwitchState(desktop.id, None)
+        self.apply = apply
+
+    def tick(self, snapshot: ProcessSnapshot | None = None):
+        next_state = resolve(snapshot or snapshot_windows(), self.profiles, self.state)
+        if next_state.active_id == self.state.active_id:
+            self.state = next_state
+            return None
+        self.state = next_state
+        profile = next(profile for profile in self.profiles if profile.id == next_state.active_id)
+        return self.apply(profile)
 
 
 def running():

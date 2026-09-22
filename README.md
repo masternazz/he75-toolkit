@@ -2,7 +2,7 @@
 
 Control an **EPOMAKER HE75 V2** hall-effect keyboard from Windows **without the official driver app**: per-key actuation and Rapid Trigger, lighting for the keys and the top light bar, and automatic per-game profiles that switch when a game starts.
 
-- **A small desktop app** (`app.py`): game presets, lighting, auto-switch toggle, live log.
+- **A desktop profile manager** (`app.py`): saved Desktop/game profiles, linked executables, lighting, Hall-effect presets, auto-switch and a live log.
 - **Command-line tools** for everything the app does, so it is scriptable.
 - **Per-game presets** for Apex Legends, Marvel Rivals and Valorant, built from published guidance (sources in [docs/game-settings.md](docs/game-settings.md)).
 - **Every write is verified** by reading it back from the keyboard, and a backup of the profile is saved first.
@@ -33,9 +33,12 @@ The window shows *"EPOMAKER HE75 V2 connected"* when it finds the board. Use `py
 
 | Section | What it does |
 |---|---|
-| **Hall-effect presets** | One click applies Apex / Rivals / Valorant / Generic FPS settings to the *active* onboard profile, or resets every key to stock. Takes about two minutes (each key is written, then verified). |
+| **Profiles** | Desktop is the work/lounge fallback. Apex Legends, Marvel Rivals, Valorant and Generic FPS are included as editable starting profiles. Select a profile, link an already-running app or browse for its `.exe`, then apply it. |
+| **Hall-effect presets** | Quick apply buttons apply Apex / Rivals / Valorant / Generic FPS settings to the active onboard profile, or reset every key to stock. Takes about two minutes (each key is written, then verified). |
 | **Lighting** | Effect, colour, brightness and speed for the keys and, separately, the light bar. One-click looks: *Cyberpunk* (hot pink keys, cyan bar) and *Dark purple*. |
-| **Per-game auto-switch** | Watches for a game's process. When it starts, applies that game's preset; when it closes, restores your idle setup (`reset` = stock keys, or `gaming`). |
+| **Per-game auto-switch** | Watches the focused window and running processes. A focused mapped game wins; alt-tabbing to Discord or a browser keeps the running game's profile. Desktop returns only after every linked game closes. |
+
+Saved profiles live in `%LOCALAPPDATA%\HE75 Toolkit\profiles.json`. The file is ordinary JSON so you can back it up; invalid files are kept with a timestamp and replaced with the built-in defaults.
 
 ### Command line
 
@@ -81,7 +84,7 @@ The keyboard exposes a vendor HID interface. Commands are 64-byte feature report
 | | |
 |---|---|
 | [docs/game-settings.md](docs/game-settings.md) | Per-game settings, the reasoning, and the sources |
-| [docs/autogame.md](docs/autogame.md) | Per-game auto-switch: how it works, adding games, run at logon |
+| [docs/autogame.md](docs/autogame.md) | Saved profiles, per-game auto-switch and legacy command-line watcher |
 | [docs/protocol.md](docs/protocol.md) | The HID protocol, packet formats, checksums, Windows quirks |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | "Not found", "cannot open", double-typing, and more |
 | [docs/development.md](docs/development.md) | Layout, tests, how to add a preset or port to another board |

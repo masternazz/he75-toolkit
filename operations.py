@@ -6,6 +6,7 @@ import threading
 from typing import Any, Callable
 
 import winhid
+import hall
 from profiles import Profile
 
 
@@ -47,13 +48,26 @@ def _write_lighting(keyboard: Any, zone: str, target: dict[str, Any]) -> str:
     return f"{zone} lighting verified"
 
 
-def apply_profile(profile: Profile, *, open_keyboard: Callable[[], Any] = winhid.open_keyboard) -> ApplyResult:
+def _apply_hall_preset(keyboard: Any, preset: str) -> str:
+    if preset not in (*hall.PRESETS, "reset"):
+        raise ValueError(f"unknown Hall-effect preset: {preset}")
+    hall.apply_preset(keyboard, preset)
+    return f"{preset} Hall-effect preset verified"
+
+
+def apply_profile(
+    profile: Profile, *, open_keyboard: Callable[[], Any] = winhid.open_keyboard,
+    apply_hall: Callable[[Any, str], str] = _apply_hall_preset,
+) -> ApplyResult:
     """Apply profile sections supported today and reject any failed readback."""
     details: list[str] = []
     with DEVICE_LOCK:
         keyboard = open_keyboard()
         try:
             keyboard.identify()
+            preset = profile.hall.get("preset")
+            if preset:
+                details.append(apply_hall(keyboard, preset))
             for zone, target in profile.lighting.items():
                 if zone not in ("keys", "bar"):
                     raise ValueError(f"unknown lighting zone: {zone}")

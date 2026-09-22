@@ -1,6 +1,25 @@
 # Per-game auto-switch
 
-The keyboard has only two onboard profiles and no way to detect games itself, so the switching is done from your PC: a small watcher looks at the running processes and applies the matching preset.
+The keyboard has only two onboard profiles and no way to detect games itself, so switching is done from your PC. The desktop app has saved named profiles; its watcher chooses one based on the foreground window and running processes.
+
+## Desktop app profiles
+
+On first launch the app creates a local profile library at `%LOCALAPPDATA%\HE75 Toolkit\profiles.json`:
+
+- **Desktop** is the work/lounge fallback (stock Hall settings with dim purple lighting).
+- **Apex Legends**, **Marvel Rivals**, **Valorant**, and **Generic FPS** are starting profiles with Hall settings and the Cyberpunk lighting look.
+
+Use **+ Add profile** to make another game profile. On its card, choose **+ App** to link a process from the currently running-app list or browse to a game `.exe`. Executable matching is case-insensitive and saves only the filename, so moving a game installation does not break it.
+
+The app resolves profiles as follows:
+
+1. A linked game in the foreground wins when more than one linked game is running.
+2. If you alt-tab to an unlinked app such as Discord or a browser, the last linked game stays active while it remains running.
+3. Desktop applies only when no linked game process is still running.
+
+Profile application is serialized so only one keyboard write happens at a time. Hall and lighting writes are read back and must verify before the app reports success.
+
+## Legacy command-line watcher
 
 ## How it works
 
@@ -52,7 +71,7 @@ Logs from a windowless run are not kept. To debug, run `python autogame.py` in a
 
 ## The app's toggle
 
-The app's **Per-game auto-switch** checkbox runs the same watcher inside the window and shows its output in the log. Use one or the other, not both: two watchers would fight over the device.
+The app's **Per-game auto-switch** checkbox uses its saved profile library and shows activity in the log. The command-line watcher remains useful for scripts and scheduled tasks. Use one or the other, not both: two watchers would fight over the device.
 
 ## Limitations
 

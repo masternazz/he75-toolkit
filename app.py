@@ -5,11 +5,14 @@
 Game presets (actuation + Rapid Trigger), lighting for the keys and the top light bar, and an
 "auto-switch when a game starts" toggle. Close the official EPOMAKER driver app first.
 """
-import queue, sys, threading, tkinter as tk
-from tkinter import colorchooser, ttk
+import os, queue, sys, threading, tkinter as tk
+from pathlib import Path
+from tkinter import colorchooser, filedialog, simpledialog, ttk
 
-import autogame, hall, winhid
+import autogame, hall, operations, winhid
 from epomaker_driver import codec
+from profiles import Profile, ProfileStore, normalize_exe
+from switcher import running_executables
 
 KEY_MODES = [m for m in codec.LIGHT_MODES if m not in ("off", "picture", "screen", "music")]
 BAR_MODES = ["off", "solid", "neon", "wave"]
@@ -19,6 +22,11 @@ LOOKS = {   # one-click lighting looks: (key mode, key colour, key speed, bar mo
     "Cyberpunk": ("ripple", "#FF0090", 3, "wave", "#00F0FF", 2),
     "Dark purple": ("ripple", "#4B0082", 3, "solid", "#4B0082", 0),
 }
+
+
+def profile_library_path():
+    root = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "HE75 Toolkit"
+    return root / "profiles.json"
 
 
 class LogWriter:
@@ -41,14 +49,29 @@ class App(tk.Tk):
         self.light = {}   # side -> dict of tk vars
         self.status = tk.StringVar(value="Looking for the keyboard...")
         self.busy_text = tk.StringVar()
+        self.store = ProfileStore(profile_library_path())
+        self.profiles = self.store.load()
+        self.selected_profile_id = self.profiles[0].id
+        self.active_profile = tk.StringVar(value="Desktop profile ready")
+        self.monitor = None
 
         ttk.Label(self, textvariable=self.status, font=("Segoe UI", 11, "bold")).pack(anchor="w", padx=12, pady=(10, 0))
         ttk.Label(self, textvariable=self.busy_text, foreground="#b45309").pack(anchor="w", padx=12)
 
-        games = ttk.LabelFrame(self, text="Hall-effect presets (applied to the active onboard profile, ~2 min each)")
+        dashboard = ttk.LabelFrame(self, text="Profiles")
+        dashboard.pack(fill="x", padx=12, pady=8)
+        header = ttk.Frame(dashboard)
+        header.pack(fill="x", padx=8, pady=(6, 0))
+        ttk.Label(header, textvariable=self.active_profile, font=("Segoe UI", 10, "bold")).pack(side="left")
+        ttk.Button(header, text="+ Add profile", command=self.add_profile).pack(side="right")
+        self.profile_cards = ttk.Frame(dashboard)
+        self.profile_cards.pack(fill="x", padx=8, pady=8)
+        self.render_profiles()
+
+        games = ttk.LabelFrame(self, text="Quick apply (applied to the active onboard profile, ~2 min each)")
         games.pack(fill="x", padx=12, pady=8)
         for label, preset in GAME_BUTTONS:
-            b = ttk.Button(games, text=label, command=lambda p=preset: self.bg(lambda: autogame.apply_preset(p), f"Applying {p}..."))
+            b = ttk.Button(games, text=label, command=lambda p=preset: self.apply_profile_id("desktop" if p == "reset" else p))
             b.pack(side="left", padx=6, pady=8)
             self.buttons.append(b)
         b = ttk.Button(games, text="Show key settings", command=lambda: self.bg(self.show_keys, "Reading..."))
@@ -84,6 +107,84 @@ class App(tk.Tk):
         self.after(100, self.pump)
         self.bg(self.identify, "Connecting...")
 
+    # ---- profile dashboard
+    def selected_profile(self):
+        return next(profile for profile in self.profiles if profile.id == self.selected_profile_id)
+
+    def render_profiles(self):
+        for child in self.profile_cards.winfo_children():
+            child.destroy()
+        for index, profile in enumerate(self.profiles):
+            card = ttk.LabelFrame(self.profile_cards, text=profile.name)
+            card.grid(row=0, column=index, padx=(0, 8), pady=2, sticky="nsew")
+            linked = ", ".join(profile.executables) if profile.executables else "No linked apps"
+            ttk.Label(card, text=linked, foreground="#666", wraplength=145).pack(anchor="w", padx=8, pady=(5, 2))
+            preset = profile.hall.get("preset", "custom")
+            ttk.Label(card, text=f"Keys: {preset}").pack(anchor="w", padx=8)
+            actions = ttk.Frame(card)
+            actions.pack(fill="x", padx=8, pady=6)
+            ttk.Button(actions, text="Select", command=lambda p=profile: self.select_profile(p.id)).pack(side="left")
+            ttk.Button(actions, text="Apply", command=lambda p=profile: self.apply_profile_id(p.id)).pack(side="left", padx=4)
+            if profile.kind == "game":
+                ttk.Button(actions, text="+ App", command=lambda p=profile: self.add_app(p.id)).pack(side="left")
+
+    def select_profile(self, profile_id):
+        self.selected_profile_id = profile_id
+        profile = self.selected_profile()
+        self.active_profile.set(f"Selected: {profile.name}")
+
+    def add_profile(self):
+        name = simpledialog.askstring("Add profile", "Profile name:", parent=self)
+        if not name:
+            return
+        profile = Profile.new(name.strip(), "game")
+        self.profiles.append(profile)
+        self.store.save(self.profiles)
+        self.select_profile(profile.id)
+        self.render_profiles()
+
+    def add_app(self, profile_id):
+        profile = next(profile for profile in self.profiles if profile.id == profile_id)
+        dialog = tk.Toplevel(self)
+        dialog.title(f"Link app to {profile.name}")
+        dialog.transient(self)
+        dialog.grab_set()
+        ttk.Label(dialog, text="Running apps").pack(anchor="w", padx=12, pady=(12, 2))
+        apps = tk.Listbox(dialog, width=52, height=12)
+        apps.pack(fill="both", expand=True, padx=12, pady=4)
+        for executable in sorted(running_executables()):
+            apps.insert("end", executable)
+
+        def save_executable(value):
+            if not value:
+                return
+            executable = normalize_exe(value)
+            if executable not in profile.executables:
+                profile.executables.append(executable)
+                self.store.save(self.profiles)
+                self.render_profiles()
+            dialog.destroy()
+
+        actions = ttk.Frame(dialog)
+        actions.pack(fill="x", padx=12, pady=(2, 12))
+        ttk.Button(actions, text="Link selected", command=lambda: save_executable(
+            apps.get(apps.curselection()[0]) if apps.curselection() else None
+        )).pack(side="left")
+        ttk.Button(actions, text="Browse for .exe", command=lambda: save_executable(
+            filedialog.askopenfilename(parent=dialog, title="Choose a game executable", filetypes=[("Programs", "*.exe")])
+        )).pack(side="left", padx=6)
+        ttk.Button(actions, text="Cancel", command=dialog.destroy).pack(side="right")
+
+    def apply_profile_id(self, profile_id):
+        profile = next(profile for profile in self.profiles if profile.id == profile_id)
+        self.bg(lambda: self.apply_saved_profile(profile), f"Applying {profile.name}...")
+
+    def apply_saved_profile(self, profile):
+        result = operations.apply_profile(profile)
+        self.q.put(("status", f"{profile.name} applied and verified"))
+        self.q.put(("active", profile.name))
+        print("; ".join(result.details) or f"{profile.name}: no board changes")
+
     # ---- layout helpers
     def light_row(self, parent, row, title, side, modes, mode, speed):
         v = dict(mode=tk.StringVar(value=mode), bri=tk.IntVar(value=4), speed=tk.IntVar(value=speed))
@@ -118,13 +219,19 @@ class App(tk.Tk):
         if mode in ("off", "solid"):
             speed = 0
         bri = 4 if mode == "off" else v["bri"].get()
-        with autogame.DEVICE_LOCK:
+        with operations.DEVICE_LOCK:
             kb = winhid.open_keyboard()
             try:
                 kb.identify()
                 r = kb.set_light(mode, rgb=rgb, brightness=bri, speed=speed, side=side)
             finally:
                 kb.transport.close()
+        profile = self.selected_profile()
+        profile.lighting["bar" if side else "keys"] = {
+            "mode": r["mode"], "rgb": r["rgb"], "brightness": r["brightness"], "speed": r["speed"],
+        }
+        self.store.save(self.profiles)
+        self.q.put(("profiles", ""))
         print(f"{'light bar' if side else 'keys'}: {r['mode']} #{r['rgb']:06X} speed {r['speed']} brightness {r['brightness']} (verified)")
 
     def apply_look(self, look):
@@ -178,13 +285,21 @@ class App(tk.Tk):
     def toggle_auto(self):
         if self.auto.get():
             self.stop = threading.Event()
-            self.watcher = threading.Thread(target=autogame.watch, daemon=True,
-                                            kwargs=dict(idle=self.idle.get(), stop=self.stop, log=print))
+            self.monitor = autogame.ProfileMonitor(self.profiles, apply=self.apply_saved_profile)
+            self.watcher = threading.Thread(target=self.watch_profiles, daemon=True)
             self.watcher.start()
-            print("auto-switch ON: watching for", ", ".join(sorted(autogame.GAMES)))
+            print("auto-switch ON: watching linked profile apps")
         else:
             self.stop.set()
             print("auto-switch OFF")
+
+    def watch_profiles(self):
+        while not self.stop.is_set():
+            try:
+                self.monitor.tick()
+            except Exception as error:
+                print(f"AUTO-SWITCH ERROR: {type(error).__name__}: {error}")
+            self.stop.wait(2)
 
     def pump(self):
         try:
@@ -192,7 +307,14 @@ class App(tk.Tk):
                 s = self.q.get_nowait()
                 if isinstance(s, tuple):
                     kind, text = s
-                    self.set_busy(text) if kind == "busy" else self.status.set(text)
+                    if kind == "busy":
+                        self.set_busy(text)
+                    elif kind == "active":
+                        self.active_profile.set(f"Active: {text}")
+                    elif kind == "profiles":
+                        self.render_profiles()
+                    else:
+                        self.status.set(text)
                     continue
                 self.log.configure(state="normal")
                 self.log.insert("end", s)

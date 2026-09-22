@@ -46,6 +46,18 @@ class OperationsTests(unittest.TestCase):
         with self.assertRaises(VerificationError):
             apply_profile(self.profile, open_keyboard=lambda: FakeKeyboard(readback_matches=False))
 
+    def test_apply_uses_saved_hall_preset_before_lighting(self):
+        """Game profiles without their Hall preset would only change cosmetics when selected."""
+        profile = Profile("apex", "Apex", "game", hall={"preset": "apex"})
+
+        result = apply_profile(
+            profile,
+            open_keyboard=lambda: FakeKeyboard(readback_matches=True),
+            apply_hall=lambda keyboard, preset: f"{preset} Hall-effect preset verified",
+        )
+
+        self.assertEqual(result.details, ["apex Hall-effect preset verified"])
+
 
 if __name__ == "__main__":
     unittest.main()

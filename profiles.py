@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
+import copy
 import json
 from pathlib import Path
 from typing import Any, Literal
@@ -60,7 +61,23 @@ class Profile:
 
 
 def default_library() -> list[Profile]:
-    return [Profile.desktop()]
+    desktop = Profile.desktop()
+    desktop.hall = {"preset": "reset"}
+    desktop.lighting = {
+        "keys": {"mode": "solid", "rgb": 0x4B0082, "brightness": 2, "speed": 0},
+        "bar": {"mode": "solid", "rgb": 0x4B0082, "brightness": 2, "speed": 0},
+    }
+    game_lighting = {
+        "keys": {"mode": "ripple", "rgb": 0xFF0090, "brightness": 4, "speed": 3},
+        "bar": {"mode": "wave", "rgb": 0x00F0FF, "brightness": 4, "speed": 2},
+    }
+    return [
+        desktop,
+        Profile("apex", "Apex Legends", "game", ["r5apex.exe", "r5apex_dx12.exe"], copy.deepcopy(game_lighting), {"preset": "apex"}),
+        Profile("rivals", "Marvel Rivals", "game", ["marvel-win64-shipping.exe"], copy.deepcopy(game_lighting), {"preset": "rivals"}),
+        Profile("valorant", "Valorant", "game", ["valorant-win64-shipping.exe"], copy.deepcopy(game_lighting), {"preset": "valorant"}),
+        Profile("gaming", "Generic FPS", "game", [], copy.deepcopy(game_lighting), {"preset": "gaming"}),
+    ]
 
 
 class ProfileStore:
