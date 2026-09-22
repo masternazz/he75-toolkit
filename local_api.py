@@ -20,10 +20,14 @@ class LocalApi:
         *,
         status: Callable[[], dict[str, Any]],
         logs: Callable[[], list[dict[str, Any]]] | None = None,
+        preview: Callable[[Any], list[dict[str, Any]]] | None = None,
+        apply: Callable[[Any], Any] | None = None,
     ):
         self.store = store
         self.status = status
         self.logs = logs or (lambda: [])
+        self.preview = preview or (lambda _profile: [])
+        self.apply = apply
         self.server: ThreadingHTTPServer | None = None
         self.thread: threading.Thread | None = None
 
@@ -74,6 +78,55 @@ class LocalApi:
                         self.send_json(HTTPStatus.OK, profile.to_dict())
                     else:
                         self.send_json(HTTPStatus.NOT_FOUND, {"error": "profile not found"})
+                    return
+                self.send_json(HTTPStatus.NOT_FOUND, {"error": "route not found"})
+
+            def body(self):
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                    value = json.loads(self.rfile.read(length))
+                except (ValueError, json.JSONDecodeError):
+                    self.send_json(HTTPStatus.BAD_REQUEST, {"error": "body must be JSON"})
+                    return None
+                if not isinstance(value, dict):
+                    self.send_json(HTTPStatus.BAD_REQUEST, {"error": "body must be a JSON object"})
+                    return None
+                return value
+
+            def profile(self, profile_id):
+                return next((item for item in api.store.load() if item.id == profile_id), None)
+
+            def do_POST(self):
+                if not self.authorized():
+                    self.send_json(HTTPStatus.UNAUTHORIZED, {"error": "bearer token required"})
+                    return
+                body = self.body()
+                if body is None:
+                    return
+                if self.path == "/v1/preview":
+                    if set(body) != {"profile_id"} or not isinstance(body["profile_id"], str):
+                        self.send_json(HTTPStatus.BAD_REQUEST, {"error": "preview requires only profile_id"})
+                        return
+                    profile = self.profile(body["profile_id"])
+                    if not profile:
+                        self.send_json(HTTPStatus.NOT_FOUND, {"error": "profile not found"})
+                        return
+                    self.send_json(HTTPStatus.OK, {"preview": api.preview(profile)})
+                    return
+                prefix = "/v1/apply/"
+                if self.path.startswith(prefix):
+                    if body != {"confirm": True}:
+                        self.send_json(HTTPStatus.BAD_REQUEST, {"error": "apply requires confirm: true"})
+                        return
+                    profile = self.profile(self.path[len(prefix):])
+                    if not profile:
+                        self.send_json(HTTPStatus.NOT_FOUND, {"error": "profile not found"})
+                        return
+                    if not api.apply:
+                        self.send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "profile writing is unavailable"})
+                        return
+                    api.apply(profile)
+                    self.send_json(HTTPStatus.OK, {"applied": profile.id})
                     return
                 self.send_json(HTTPStatus.NOT_FOUND, {"error": "route not found"})
 

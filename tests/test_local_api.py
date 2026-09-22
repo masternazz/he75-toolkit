@@ -9,9 +9,12 @@ from local_api import LocalApi
 from profiles import Profile, ProfileStore
 
 
-def request(port, method, path, token=None):
+def request(port, method, path, token=None, body=None):
     headers = {"Authorization": f"Bearer {token}"} if token else {}
-    return urlopen(Request(f"http://127.0.0.1:{port}{path}", method=method, headers=headers), timeout=1)
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    if data:
+        headers["Content-Type"] = "application/json"
+    return urlopen(Request(f"http://127.0.0.1:{port}{path}", data=data, method=method, headers=headers), timeout=1)
 
 
 class LocalApiReadTests(unittest.TestCase):
@@ -19,7 +22,13 @@ class LocalApiReadTests(unittest.TestCase):
         self.temp = TemporaryDirectory()
         self.store = ProfileStore(Path(self.temp.name) / "profiles.json")
         self.store.save([Profile.desktop(), Profile("apex", "Apex", "game", ["r5apex.exe"])])
-        self.api = LocalApi(self.store, status=lambda: {"connected": True})
+        self.calls = []
+        self.api = LocalApi(
+            self.store,
+            status=lambda: {"connected": True},
+            preview=lambda profile: [{"profile": profile.id, "changes": ["lighting"]}],
+            apply=lambda profile: self.calls.append(profile.id),
+        )
         self.port = self.api.start("test-token")
 
     def tearDown(self):
@@ -44,6 +53,23 @@ class LocalApiReadTests(unittest.TestCase):
 
         self.assertEqual([profile["id"] for profile in library["profiles"]], ["desktop", "apex"])
         self.assertEqual(apex["name"], "Apex")
+
+    def test_apply_without_confirm_is_rejected_without_writer_call(self):
+        """A local client must explicitly confirm before it can change the keyboard."""
+        with self.assertRaises(HTTPError) as raised:
+            request(self.port, "POST", "/v1/apply/apex", "test-token", {"confirm": False})
+
+        self.assertEqual(raised.exception.code, 400)
+        raised.exception.close()
+        self.assertEqual(self.calls, [])
+
+    def test_preview_never_calls_writer(self):
+        """Previewing a profile must remain read-only even with valid credentials."""
+        with request(self.port, "POST", "/v1/preview", "test-token", {"profile_id": "apex"}) as response:
+            preview = json.load(response)
+
+        self.assertEqual(preview["preview"], [{"profile": "apex", "changes": ["lighting"]}])
+        self.assertEqual(self.calls, [])
 
 
 if __name__ == "__main__":
