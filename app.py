@@ -7,10 +7,11 @@ Game presets (actuation + Rapid Trigger), lighting for the keys and the top ligh
 """
 import os, queue, sys, threading, tkinter as tk
 from pathlib import Path
-from tkinter import colorchooser, filedialog, simpledialog, ttk
+from tkinter import colorchooser, filedialog, messagebox, simpledialog, ttk
 
 import autogame, hall, operations, winhid
 from epomaker_driver import codec
+from local_api import ApiTokenStore, LocalApi
 from profiles import Profile, ProfileStore, normalize_exe
 from switcher import running_executables
 
@@ -27,6 +28,10 @@ LOOKS = {   # one-click lighting looks: (key mode, key colour, key speed, bar mo
 def profile_library_path():
     root = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "HE75 Toolkit"
     return root / "profiles.json"
+
+
+def api_settings_path():
+    return profile_library_path().with_name("local-api.json")
 
 
 class LogWriter:
@@ -54,6 +59,10 @@ class App(tk.Tk):
         self.selected_profile_id = self.profiles[0].id
         self.active_profile = tk.StringVar(value="Desktop profile ready")
         self.monitor = None
+        self.api_state = {"active_profile": "desktop", "keyboard": "unknown"}
+        self.api_token_store = ApiTokenStore(api_settings_path())
+        self.api_token = self.api_token_store.load_or_create()
+        self.api = LocalApi(self.store, status=self.api_status, preview=self.api_preview, apply=self.apply_saved_profile)
 
         ttk.Label(self, textvariable=self.status, font=("Segoe UI", 11, "bold")).pack(anchor="w", padx=12, pady=(10, 0))
         ttk.Label(self, textvariable=self.busy_text, foreground="#b45309").pack(anchor="w", padx=12)
@@ -100,6 +109,16 @@ class App(tk.Tk):
         ttk.Label(auto, text="when idle:").pack(side="left", padx=(12, 2))
         ttk.Combobox(auto, textvariable=self.idle, values=["reset", "gaming"], width=8, state="readonly").pack(side="left")
         ttk.Label(auto, text="watching: " + ", ".join(sorted(set(autogame.GAMES.values()))), foreground="#666").pack(side="right", padx=8)
+
+        integration = ttk.LabelFrame(self, text="Local AI / debug integration")
+        integration.pack(fill="x", padx=12, pady=(0, 8))
+        self.api_enabled = tk.BooleanVar()
+        self.api_endpoint = tk.StringVar(value="Disabled — listens on this PC only")
+        ttk.Checkbutton(integration, text="Enable local API", variable=self.api_enabled,
+                        command=self.toggle_api).pack(side="left", padx=6, pady=8)
+        ttk.Label(integration, textvariable=self.api_endpoint, foreground="#666").pack(side="left", padx=8)
+        ttk.Button(integration, text="Copy token", command=self.copy_api_token).pack(side="right", padx=(2, 6))
+        ttk.Button(integration, text="Regenerate token", command=self.regenerate_api_token).pack(side="right", padx=4)
 
         self.log = tk.Text(self, height=12, state="disabled", wrap="word", font=("Consolas", 9))
         self.log.pack(fill="both", expand=True, padx=12, pady=(4, 12))
@@ -181,9 +200,46 @@ class App(tk.Tk):
 
     def apply_saved_profile(self, profile):
         result = operations.apply_profile(profile)
+        self.api_state["active_profile"] = profile.id
         self.q.put(("status", f"{profile.name} applied and verified"))
         self.q.put(("active", profile.name))
         print("; ".join(result.details) or f"{profile.name}: no board changes")
+
+    def api_status(self):
+        return dict(self.api_state)
+
+    def api_preview(self, profile):
+        changes = []
+        if profile.hall:
+            changes.append({"section": "hall", "to": profile.hall})
+        return changes + operations.preview(profile, {"lighting": {}})
+
+    def toggle_api(self):
+        if self.api_enabled.get():
+            port = self.api.start(self.api_token)
+            self.api_endpoint.set(f"http://127.0.0.1:{port}/v1")
+            print("local API enabled (loopback only; token not logged)")
+        else:
+            self.api.stop()
+            self.api_endpoint.set("Disabled — listens on this PC only")
+            print("local API disabled")
+
+    def copy_api_token(self):
+        self.clipboard_clear()
+        self.clipboard_append(self.api_token)
+        self.status.set("Local API token copied to clipboard")
+
+    def regenerate_api_token(self):
+        if not messagebox.askyesno("Regenerate local API token", "Existing local integrations will stop working. Continue?", parent=self):
+            return
+        running = self.api_enabled.get()
+        if running:
+            self.api.stop()
+        self.api_token = self.api_token_store.regenerate()
+        if running:
+            port = self.api.start(self.api_token)
+            self.api_endpoint.set(f"http://127.0.0.1:{port}/v1")
+        self.status.set("Local API token regenerated")
 
     # ---- layout helpers
     def light_row(self, parent, row, title, side, modes, mode, speed):
@@ -251,8 +307,10 @@ class App(tk.Tk):
                     info = kb.identify()
                 finally:
                     kb.transport.close()
+            self.api_state["keyboard"] = "connected"
             self.q.put(("status", f"{info['model']} connected (firmware {info['usb_version']:#06x})"))
         except Exception as e:
+            self.api_state["keyboard"] = "not found"
             self.q.put(("status", "Keyboard not found. Plug it in by USB and close the EPOMAKER driver app."))
             print(f"{type(e).__name__}: {e}")
 
@@ -326,6 +384,7 @@ class App(tk.Tk):
 
     def close(self):
         self.stop.set()
+        self.api.stop()
         self.destroy()
 
 

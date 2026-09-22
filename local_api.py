@@ -3,12 +3,44 @@ from __future__ import annotations
 
 import hmac
 import json
+import os
+from pathlib import Path
+import secrets
 import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 
 from profiles import ProfileStore
+
+
+class ApiTokenStore:
+    """Keep the local API token stable until the user deliberately rotates it."""
+
+    def __init__(self, path: Path | str):
+        self.path = Path(path)
+
+    def load_or_create(self) -> str:
+        try:
+            value = json.loads(self.path.read_text(encoding="utf-8"))
+            token = value["token"]
+            if isinstance(token, str) and len(token) >= 32:
+                return token
+        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+            pass
+        return self.regenerate()
+
+    def regenerate(self) -> str:
+        token = secrets.token_urlsafe(32)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.path.with_name(f".{self.path.name}.tmp")
+        temporary.write_text(json.dumps({"token": token}) + "\n", encoding="utf-8")
+        try:
+            os.chmod(temporary, 0o600)
+        except OSError:
+            pass
+        temporary.replace(self.path)
+        return token
 
 
 class LocalApi:

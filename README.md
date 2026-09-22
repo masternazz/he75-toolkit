@@ -40,6 +40,8 @@ The window shows *"EPOMAKER HE75 V2 connected"* when it finds the board. Use `py
 
 Saved profiles live in `%LOCALAPPDATA%\HE75 Toolkit\profiles.json`. The file is ordinary JSON so you can back it up; invalid files are kept with a timestamp and replaced with the built-in defaults.
 
+The **Local AI / debug integration** switch is off by default. When enabled it exposes a token-protected API on `127.0.0.1` only, for a local helper to inspect, preview, or explicitly apply saved profiles. See [docs/local-api.md](docs/local-api.md).
+
 ### Command line
 
 ```powershell
@@ -85,6 +87,7 @@ The keyboard exposes a vendor HID interface. Commands are 64-byte feature report
 |---|---|
 | [docs/game-settings.md](docs/game-settings.md) | Per-game settings, the reasoning, and the sources |
 | [docs/autogame.md](docs/autogame.md) | Saved profiles, per-game auto-switch and legacy command-line watcher |
+| [docs/local-api.md](docs/local-api.md) | Opt-in, token-authenticated loopback API for local integrations |
 | [docs/protocol.md](docs/protocol.md) | The HID protocol, packet formats, checksums, Windows quirks |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | "Not found", "cannot open", double-typing, and more |
 | [docs/development.md](docs/development.md) | Layout, tests, how to add a preset or port to another board |

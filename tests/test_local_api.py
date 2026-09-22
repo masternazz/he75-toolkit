@@ -5,7 +5,7 @@ import unittest
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from local_api import LocalApi
+from local_api import ApiTokenStore, LocalApi
 from profiles import Profile, ProfileStore
 
 
@@ -71,6 +71,19 @@ class LocalApiReadTests(unittest.TestCase):
         self.assertEqual(preview["preview"], [{"profile": "apex", "changes": ["lighting"]}])
         self.assertEqual(self.calls, [])
 
+
+class ApiTokenStoreTests(unittest.TestCase):
+    def test_token_is_persistent_until_explicitly_regenerated(self):
+        """Restarting the app must not strand a local integration with a surprise new token."""
+        with TemporaryDirectory() as folder:
+            tokens = ApiTokenStore(Path(folder) / "api.json")
+            first = tokens.load_or_create()
+            same = tokens.load_or_create()
+            replacement = tokens.regenerate()
+
+        self.assertEqual(first, same)
+        self.assertNotEqual(first, replacement)
+        self.assertGreaterEqual(len(first), 32)
 
 if __name__ == "__main__":
     unittest.main()
