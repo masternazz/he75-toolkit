@@ -1,7 +1,7 @@
 import queue
 import unittest
 
-from app import App
+from app import App, profile_card_position
 
 
 class Value:
@@ -13,6 +13,10 @@ class Value:
 
 
 class ProfileRefreshEventsTests(unittest.TestCase):
+    def test_profile_cards_wrap_after_three_columns(self):
+        """Adding a fourth game must begin a new row rather than disappearing off-screen."""
+        self.assertEqual(profile_card_position(3), (1, 0))
+
     def test_profile_refresh_event_is_rendered_on_ui_pump(self):
         """Changing lights must request card rendering through the UI event loop, not a HID worker."""
         class FakeApp:

@@ -34,6 +34,11 @@ def api_settings_path():
     return profile_library_path().with_name("local-api.json")
 
 
+def profile_card_position(index: int, columns: int = 3) -> tuple[int, int]:
+    """Place dashboard cards in readable rows instead of a widening single strip."""
+    return divmod(index, columns)
+
+
 class LogWriter:
     """Replaces sys.stdout so prints from any worker thread land in the log box."""
     def __init__(self, q): self.q = q
@@ -45,8 +50,8 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("HE75 Toolkit")
-        self.geometry("760x640")
-        self.minsize(640, 540)
+        self.geometry("860x700")
+        self.minsize(680, 560)
         self.q = queue.Queue()
         sys.stdout = LogWriter(self.q)
         self.buttons, self.stop, self.watcher = [], threading.Event(), None
@@ -75,6 +80,8 @@ class App(tk.Tk):
         ttk.Button(header, text="+ Add profile", command=self.add_profile).pack(side="right")
         self.profile_cards = ttk.Frame(dashboard)
         self.profile_cards.pack(fill="x", padx=8, pady=8)
+        for column in range(3):
+            self.profile_cards.columnconfigure(column, weight=1)
         self.render_profiles()
 
         games = ttk.LabelFrame(self, text="Quick apply (applied to the active onboard profile, ~2 min each)")
@@ -135,7 +142,8 @@ class App(tk.Tk):
             child.destroy()
         for index, profile in enumerate(self.profiles):
             card = ttk.LabelFrame(self.profile_cards, text=profile.name)
-            card.grid(row=0, column=index, padx=(0, 8), pady=2, sticky="nsew")
+            row, column = profile_card_position(index)
+            card.grid(row=row, column=column, padx=4, pady=3, sticky="nsew")
             linked = ", ".join(profile.executables) if profile.executables else "No linked apps"
             ttk.Label(card, text=linked, foreground="#666", wraplength=145).pack(anchor="w", padx=8, pady=(5, 2))
             preset = profile.hall.get("preset", "custom")
