@@ -1,0 +1,583 @@
+"""Modern magnetic keyboard backend; see docs/he60-lite-research.md and docs/ry5088-h60.md."""
+
+from __future__ import annotations
+
+import struct
+
+from . import codec
+from .device import Keyboard
+from .errors import ProtocolError, UnsupportedDevice
+from .he_calibration import HECalibrationMixin
+from .he_knobs import knob_slots, validate_knob_binding
+from .he_lighting import HELightingMixin
+from .he_modes import plan_mode, required_fields, validate_definition
+from .he_settings import plan_update
+from .he_snap import HESnapMixin
+from .he_switches import HESwitchMixin, model_switch_types
+from .magnetic import (
+    assemble_pages,
+    decode_field,
+    encode_read,
+    key_field,
+    top_dead_zone_supported,
+    travel_multiplier,
+)
+from .models import (
+    HE_RF_IDS,
+    HE_SLEEP_IDS,
+    RY5088_IDS,
+    RY5088_PRODUCTS,
+    RY5088_SIDE_IDS,
+    RY5088_SWITCH_IDS,
+    display_spec,
+    model_by_id,
+    validate_sleep_times,
+)
+from .versions import parse_version, version_request
+
+# The RY5088 H60 uses the same USB PID as several catalog siblings.  The
+# internal identity check below is therefore mandatory before any operation.
+HE_PRODUCTS = {**RY5088_PRODUCTS, 0x502C: (3727,), 0x502E: (3759,)}
+COMMANDS = frozenset(
+    (
+        "identify",
+        "backup",
+        "restore",
+        "status",
+        "matrix",
+        "key",
+        "bind-key",
+        "bind-media",
+        "bind-mouse",
+        "bind-macro",
+        "disable-key",
+        "get-macro",
+        "macro",
+        "profile",
+        "get-magnetic",
+        "read-calibration",
+        "calibrate",
+        "magnetic-key",
+        "magnetic-mode",
+        "snap",
+        "snap-clear",
+        "switch-type",
+        "get-options",
+        "options",
+        "get-auto-os",
+        "auto-os",
+        "debounce",
+        "get-sleep",
+        "sleep",
+        "get-light",
+        "light",
+        "get-picture",
+        "picture",
+        "picture-key",
+        "screen",
+        "animation",
+        "clock",
+        "display-language-toggle",
+    )
+)
+OPCODES = frozenset(
+    (
+        0x04,
+        0x06,
+        0x07,
+        0x08,
+        0x09,
+        0x0A,
+        0x0B,
+        0x0C,
+        0x10,
+        0x11,
+        0x17,
+        0x1C,
+        0x1E,
+        0x25,
+        0x27,
+        0x28,
+        0x29,
+        0x65,
+        0x80,
+        0x84,
+        0x86,
+        0x87,
+        0x88,
+        0x8C,
+        0x89,
+        0x8A,
+        0x8B,
+        0x8F,
+        0x90,
+        0x91,
+        0x97,
+        0xA5,
+        0xA9,
+        0xE5,
+    )
+)
+
+
+class HEKeyboard(HECalibrationMixin, HESwitchMixin, HESnapMixin, HELightingMixin, Keyboard):
+    def __init__(self, transport, *, product_id):
+        super().__init__(transport)
+        if product_id not in HE_PRODUCTS:
+            raise UnsupportedDevice("unsupported HE60 Lite USB product")
+        self.product_id = product_id
+        self.allowed_ids = HE_PRODUCTS[product_id]
+        self.expected_id = self.allowed_ids[0] if len(self.allowed_ids) == 1 else None
+
+    def identify(self):
+        self.identity = None
+        self.model = None
+        identity = codec.parse_identity(
+            self.transport.exchange(codec.identify_request(), expected=0x8F)
+        )
+        if identity["device_id"] not in self.allowed_ids:
+            raise UnsupportedDevice("HE60 Lite internal ID does not match USB product")
+        if identity["is_boot"]:
+            raise UnsupportedDevice("HE60 Lite is in bootloader mode")
+        self.expected_id = identity["device_id"]
+        self.identity = identity
+        self.model = model_by_id(identity["device_id"])
+        return {**identity, "model": self.model["displayName"]}
+
+    def _supported(self):
+        if self.identity is None:
+            self.identify()
+        if (
+            self.identity["device_id"] not in self.allowed_ids
+            or self.identity["device_id"] != self.expected_id
+            or self.identity["is_boot"]
+        ):
+            raise UnsupportedDevice("HE60 Lite identity is not supported")
+
+    def _profile_max(self):
+        # Profile count is model-specific; HE75 V2 3518 and HE60 Lite have two.
+        self._supported()
+        if self.expected_id in RY5088_IDS:
+            return self.model["layer"] - 1
+        return 1
+
+    def _check_commands(self, commands):
+        self._supported()
+        if any(command[0] not in OPCODES for command in commands):
+            raise UnsupportedDevice("operation is not migrated for HE60 Lite")
+        if self.expected_id not in RY5088_SIDE_IDS and any(
+            command[0] in (0x08, 0x88) for command in commands
+        ):
+            raise UnsupportedDevice("side lighting is unavailable on this model")
+        if self.expected_id != 3727 and any(command[0] in (0x06, 0x86) for command in commands):
+            raise UnsupportedDevice("debounce is unavailable on wireless HE60 Lite")
+        if self.expected_id not in HE_SLEEP_IDS and any(
+            command[0] in (0x11, 0x91) for command in commands
+        ):
+            raise UnsupportedDevice("sleep is unavailable on this model")
+        if self.expected_id not in HE_RF_IDS and any(command[0] == 0x80 for command in commands):
+            raise UnsupportedDevice("RF version is unavailable on wired HE60 Lite")
+        display_commands = {0x25, 0x27, 0x28, 0x29, 0xA5, 0xA9}
+        if any(command[0] in display_commands for command in commands):
+            if self.expected_id != 2376:
+                raise UnsupportedDevice("display controls are unavailable on this model")
+            if any(command[0] in (0x29, 0xA9) for command in commands):
+                raise UnsupportedDevice("HE65 Mag supports RGB565 display transfers only")
+
+    def read_matrix(self, profile=0, *, fn=False, os_mode=0, mode=0):
+        self._supported()
+        codec.bounded(profile, self._profile_max(), "profile")
+        if fn:
+            if profile != 0 or mode != 0:
+                raise ValueError("Fn reads use layer 0 and submode 0")
+            codec.bounded(os_mode, 1, "OS selector")
+            if not self.model["fnSysLayer"].get("mac" if os_mode else "win", 0):
+                raise UnsupportedDevice("this model has no Fn bank for the selected OS")
+        else:
+            codec.bounded(mode, 3, "submode")
+
+        def operation():
+            pages = []
+            for page in range(8):
+                command = (
+                    codec.fn_read(profile, page, os_mode)
+                    if fn
+                    else codec.key_matrix_read(profile, page, mode, profile_max=self._profile_max())
+                )
+                response = self.transport.exchange(command)
+                if len(response) != 64:
+                    raise ProtocolError("incomplete HE60 matrix page")
+                pages.append(response)
+            return b"".join(pages)
+
+        return self.transport.transaction(operation)
+
+    def set_key(self, slot, action, *, profile=0, fn=False, os_mode=0, mode=0):
+        def operation():
+            self._supported()
+            codec.bounded(slot, 127, "slot")
+            validate_knob_binding(self.expected_id, slot, action, fn=fn)
+            if fn:
+                if profile != 0 or mode != 0:
+                    raise ValueError("Fn writes use layer 0 and submode 0")
+                codec.bounded(os_mode, 1, "OS selector")
+                if not self.model["fnSysLayer"].get("mac" if os_mode else "win", 0):
+                    raise UnsupportedDevice("this model has no Fn bank for the selected OS")
+            else:
+                codec.bounded(mode, 3, "submode")
+            command = (
+                codec.fn_single(slot, action, layer=profile, os_mode=os_mode)
+                if fn
+                else codec.single_key(
+                    profile, slot, action, mode=mode, profile_max=self._profile_max()
+                )
+            )
+            self._write([command])
+            actual = self.read_matrix(profile, fn=fn, os_mode=os_mode, mode=mode)[
+                slot * 4 : slot * 4 + 4
+            ]
+            if actual != bytes(action):
+                raise ProtocolError("HE60 key readback differs")
+            return list(actual)
+
+        return self.transport.transaction(operation)
+
+    def status(self):
+        def operation():
+            identity = self.identify()
+            profile = self._query(codec.packet([0x84]), expected=0x84)[1]
+            usb = identity["usb_version"] or None
+            rf = None
+            if self.expected_id in HE_RF_IDS:
+                rf = parse_version("rf", self._query(version_request("rf"), expected=0x80))
+            capabilities = [
+                "keymap",
+                "fn",
+                "macro",
+                "profile",
+                "submodes",
+                "os",
+                "magnetic-read",
+                "calibration-session",
+                "magnetic-actuation",
+                "magnetic-modes",
+                "snap",
+            ]
+            result = {
+                "identity": self.identity,
+                "model": self.model["displayName"],
+                "profile": profile,
+                "profiles": self._profile_max() + 1,
+                "versions": {"usb": usb, "rf": rf},
+                "capabilities": capabilities,
+                "submodes": 4,
+                "options": self.get_options(),
+                "auto_os": self.get_auto_os(),
+                "light": self.get_light(),
+                "picture_banks": 3 if self.expected_id == 3727 else 5,
+            }
+            result["capabilities"].extend(("lighting", "picture"))
+            if self.expected_id == 2376:
+                result["capabilities"].append("display")
+                result["display"] = display_spec(self.expected_id)
+            if self.expected_id in RY5088_SWITCH_IDS:
+                result["capabilities"].extend(("magnetic-axis-read", "switch-type"))
+                result["switch_types"] = model_switch_types(self.expected_id)
+                display_names = self.model.get("other", {}).get("specialSwitchDisplayName", {})
+                if display_names:
+                    result["switch_display_names"] = display_names
+            slots = knob_slots(self.expected_id)
+            if slots:
+                result["knob_slots"] = slots
+            if self.expected_id in RY5088_SIDE_IDS:
+                result["capabilities"].append("side-lighting")
+                result["side_light"] = self.get_light(side=True)
+            if self.expected_id == 3727:
+                result["capabilities"].append("debounce")
+                result["debounce"] = self._query(codec.packet([0x86]), expected=0x86)[1]
+            elif self.expected_id in HE_SLEEP_IDS:
+                result["capabilities"].append("sleep")
+                result["sleep"] = self.get_sleep()
+            return result
+
+        return self.transport.transaction(operation)
+
+    def set_debounce(self, milliseconds):
+        if self.expected_id != 3727:
+            raise UnsupportedDevice("debounce is unavailable on wireless HE60 Lite")
+        if type(milliseconds) is not int or not 1 <= milliseconds <= 10:
+            raise ValueError("HE60 debounce must be an integer from 1 through 10")
+        return super().set_debounce(milliseconds)
+
+    def get_sleep(self):
+        self._supported()
+        if self.expected_id not in HE_SLEEP_IDS:
+            raise UnsupportedDevice("sleep controls are unavailable on this model")
+        raw = self._query(codec.packet([0x91]), expected=0x91)
+        parsed = codec.parse_sleep(raw)
+        parsed.pop("deep_dongle")
+        if self.expected_id == 3417:
+            parsed.pop("deep_bluetooth")
+        return parsed
+
+    def set_sleep(self, bt, dongle, deep_bt=None, deep_dongle=None):
+        self._supported()
+        if self.expected_id not in HE_SLEEP_IDS:
+            raise UnsupportedDevice("sleep controls are unavailable on this model")
+        if self.expected_id == 3417:
+            if deep_bt is not None or deep_dongle is not None:
+                raise ValueError("this model exposes two public sleep timers")
+        elif deep_dongle is not None:
+            raise ValueError("this model exposes three public sleep timers")
+        elif deep_bt is None:
+            raise ValueError("this model requires the deep Bluetooth sleep timer")
+        values = (bt, dongle, deep_bt)
+        if self.expected_id == 3759:
+            if any(type(value) is not int or not 60 <= value <= 3600 for value in values):
+                raise ValueError("wireless HE60 sleep timers must be integers from 60 through 3600")
+        elif self.expected_id in (3365, 3518, 3613, 4071):
+            # These models expose three public timers; keep the fourth wire word untouched below.
+            validate_sleep_times(self.expected_id, (*values, None))
+        elif self.expected_id == 3417:
+            validate_sleep_times(self.expected_id, (bt, dongle, None, None))
+        elif self.expected_id == 3883:
+            if any(type(value) is not int or not 0 <= value <= 65535 for value in values):
+                raise ValueError("HE75 V2 TMR sleep timers must be integers from 0 through 65535")
+        elif (
+            any(type(value) is not int or not 0 <= value <= 64800 for value in values)
+            or deep_bt < 10
+        ):
+            raise ValueError(
+                "RY5088 sleep timers must be integers: BT/dongle 0–64800; deep BT 10–64800"
+            )
+
+        def operation():
+            original = self._query(codec.packet([0x91]), expected=0x91)
+            if self.expected_id == 3883:
+                command = bytearray(
+                    codec.packet(
+                        bytes([0x11])
+                        + bytes(7)
+                        + struct.pack("<4H", bt, dongle, deep_bt or 0, deep_dongle or 0)
+                    )
+                )
+            else:
+                command = bytearray(codec.sleep_times(bt, dongle, deep_bt or 0, deep_dongle or 0))
+            if self.expected_id == 3417:
+                command[12:16] = original[12:16]
+            else:
+                command[14:16] = original[14:16]
+            self._write([bytes(command)])
+            actual = self._query(codec.packet([0x91]), expected=0x91)
+            parsed = codec.parse_sleep(actual)
+            if self.expected_id == 3417 and actual[12:16] != original[12:16]:
+                raise ProtocolError("hidden sleep timers changed during write")
+            if self.expected_id != 3417 and actual[14:16] != original[14:16]:
+                raise ProtocolError("hidden sleep timer changed during write")
+            if self.expected_id == 3417:
+                expected = (bt, dongle)
+                actual_values = tuple(parsed[key] for key in ("bluetooth", "dongle"))
+            else:
+                expected = values
+                actual_values = tuple(
+                    parsed[key] for key in ("bluetooth", "dongle", "deep_bluetooth")
+                )
+            if actual_values != expected:
+                raise ProtocolError("sleep readback differs")
+            parsed.pop("deep_dongle")
+            if self.expected_id == 3417:
+                parsed.pop("deep_bluetooth")
+            return parsed
+
+        return self.transport.transaction(operation)
+
+    def get_magnetic(self):
+        def operation():
+            self.identify()
+            before = self._query(codec.packet([0x84]), expected=0x84)[1]
+            usb = self.identity["usb_version"] or None
+            rf = (
+                parse_version("rf", self._query(version_request("rf"), expected=0x80))
+                if self.expected_id in HE_RF_IDS
+                else None
+            )
+            multiplier = travel_multiplier(usb=usb, rf=rf)
+            mode_data = self._read_field(7, 128)
+            modes = list(mode_data)
+            fields = {"7": mode_data.hex()}
+            for field, length in ((0, 256), (1, 256), (6, 256)):
+                fields[str(field)] = self._read_field(field, length).hex()
+            if any(value & 0x80 for value in modes):
+                for field in (2, 3):
+                    fields[str(field)] = self._read_field(field, 256).hex()
+            if any(value & 0x7F == 2 for value in modes):
+                fields["4"] = self._read_field(4, 256).hex()
+                fields["10"] = self._read_field(10, 512).hex()
+            if any(value & 0x7F == 3 for value in modes):
+                fields["5"] = self._read_field(5, 128).hex()
+            if any(value & 0x7F == 7 for value in modes):
+                fields["9"] = self._read_field(9, 128).hex()
+            if self.expected_id in RY5088_SWITCH_IDS:
+                fields["252"] = self._read_field(252, 128).hex()
+            if top_dead_zone_supported(usb=usb, rf=rf):
+                fields["251"] = self._read_field(251, 128).hex()
+            after = self._query(codec.packet([0x84]), expected=0x84)[1]
+            if after != before:
+                raise ProtocolError("active profile changed during magnetic read")
+            return {
+                "profile": before,
+                "versions": {"usb": usb, "rf": rf},
+                "fields": fields,
+                "modes": modes,
+                "multiplier": multiplier,
+                "slots": self._decode_slots(fields, modes, multiplier),
+            }
+
+        return self.transport.transaction(operation)
+
+    @staticmethod
+    def _decode_slots(fields, modes, multiplier):
+        names = {0: "normal", 2: "dks", 3: "mt", 4: "tgl_hold", 5: "tgl_dots", 7: "snap"}
+        raw = {int(field): bytes.fromhex(value) for field, value in fields.items()}
+        slots = []
+        for slot, mode_raw in enumerate(modes):
+            mode = mode_raw & 0x7F
+            item = {
+                "slot": slot,
+                "raw_mode": mode_raw,
+                "mode": names.get(mode),
+                "fire": bool(mode_raw & 0x80),
+            }
+            for field, name in (
+                (0, "travel"),
+                (1, "lift"),
+                (2, "rapid_press"),
+                (3, "rapid_lift"),
+                (4, "dynamic"),
+                (6, "deadzone"),
+                (251, "top_deadzone"),
+                (5, "mt_time"),
+                (9, "bind_slot"),
+                (252, "axis_type"),
+            ):
+                if str(field) in fields:
+                    item[name] = decode_field(
+                        field, key_field(raw[field], slot, field=field), multiplier=multiplier
+                    )
+            if "10" in fields:
+                item["trigger_modes"] = [
+                    key_field(raw[10], slot, field=10, stage=stage) for stage in range(4)
+                ]
+            slots.append(item)
+        return slots
+
+    def _read_field(self, field, length):
+        pages = [
+            self._query(encode_read(field, page))
+            for page in range({128: 2, 256: 4, 512: 8}[length])
+        ]
+        return assemble_pages(pages, length=length)
+
+    def set_magnetic_mode(self, slot, definition):
+        """Install actions and magnetic parameters with full readback; not hardware atomic."""
+        codec.bounded(slot, 127, "slot")
+        definition = validate_definition(definition)
+
+        def operation():
+            state = self.get_magnetic()
+            profile = state["profile"]
+            for field, length in required_fields(definition, state["modes"][slot]).items():
+                if str(field) not in state["fields"]:
+                    state["fields"][str(field)] = self._read_field(field, length).hex()
+            plan = plan_mode(self.expected_id, slot, definition, state)
+            matrices = [self.read_matrix(profile, mode=submode) for submode in range(4)]
+            expected_matrices = list(matrices)
+            changed_actions = []
+            for submode, action in enumerate(definition["actions"]):
+                raw = bytearray(matrices[submode])
+                raw[slot * 4 : slot * 4 + 4] = bytes.fromhex(action)
+                expected_matrices[submode] = bytes(raw)
+                if expected_matrices[submode] != matrices[submode]:
+                    changed_actions.append(submode)
+            commands = [
+                codec.single_key(
+                    profile,
+                    slot,
+                    bytes.fromhex(definition["actions"][submode]),
+                    mode=submode,
+                    profile_max=self._profile_max(),
+                    commit=index == len(changed_actions) - 1,
+                )
+                for index, submode in enumerate(changed_actions)
+            ] + plan["commands"]
+            if self._query(codec.packet([0x84]), expected=0x84)[1] != profile:
+                raise ProtocolError("active profile changed before magnetic mode write")
+            if not commands:
+                return {
+                    "changed": False,
+                    "profile": profile,
+                    "mode": definition["mode"],
+                    "slot": slot,
+                }
+            self._write(commands)
+            actual_matrices = [self.read_matrix(profile, mode=submode) for submode in range(4)]
+            actual_fields = {
+                field: self._read_field(int(field), len(bytes.fromhex(value))).hex()
+                for field, value in plan["expected_fields"].items()
+            }
+            if self._query(codec.packet([0x84]), expected=0x84)[1] != profile:
+                raise ProtocolError(
+                    "active profile changed during magnetic mode write; state may be partial"
+                )
+            if actual_matrices != expected_matrices:
+                raise ProtocolError("magnetic action readback differs; state may be partial")
+            if actual_fields != plan["expected_fields"]:
+                raise ProtocolError("magnetic mode readback differs; state may be partial")
+            return {"changed": True, "profile": profile, "mode": definition["mode"], "slot": slot}
+
+        return self.transport.transaction(operation)
+
+    def set_magnetic(self, slot, patch):
+        """Patch actuation/rapid-trigger settings and verify complete read fields.
+
+        The planner owns model limits and commit ordering. See
+        docs/he60-lite-research.md; this does not switch the key's base mode.
+        """
+        codec.bounded(slot, 127, "slot")
+
+        def operation():
+            state = self.get_magnetic()
+            # Read inactive RT values only when the patch needs them; ordinary
+            # travel changes need not depend on an inactive field being readable.
+            if isinstance(patch, dict) and (
+                patch.get("fire") is True or "rapid_press" in patch or "rapid_lift" in patch
+            ):
+                for field in (2, 3):
+                    if str(field) not in state["fields"]:
+                        state["fields"][str(field)] = self._read_field(field, 256).hex()
+            plan = plan_update(self.expected_id, slot, patch, state)
+            before = self._query(codec.packet([0x84]), expected=0x84)[1]
+            if before != state["profile"]:
+                raise ProtocolError("active profile changed before magnetic write")
+            if not plan["commands"]:
+                return {"changed": False, "profile": before, "slot": state["slots"][slot]}
+            self._write(plan["commands"])
+            actual_fields = {
+                field: self._read_field(int(field), len(bytes.fromhex(expected))).hex()
+                for field, expected in plan["expected_fields"].items()
+            }
+            after = self._query(codec.packet([0x84]), expected=0x84)[1]
+            if after != before:
+                raise ProtocolError(
+                    "active profile changed during magnetic write; state may be partial"
+                )
+            if actual_fields != plan["expected_fields"]:
+                raise ProtocolError("magnetic readback differs; state may be partial")
+            modes = list(bytes.fromhex(actual_fields["7"]))
+            return {
+                "changed": True,
+                "profile": before,
+                "slot": self._decode_slots(actual_fields, modes, state["multiplier"])[slot],
+            }
+
+        return self.transport.transaction(operation)
