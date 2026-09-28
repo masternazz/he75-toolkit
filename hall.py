@@ -35,9 +35,8 @@ PRESETS = {
                        (["lshift"], 0.3, 0.1), (["lctrl", "c"], 0.4, 0.1), (list("123456qzr"), 2.0, None)],
     # NetEase's own Marvel Rivals guidance (relayed by Razer)
     "rivals": lambda a: [("wasd", 1.0, 0.2), (["space", "lctrl", "lshift"], 2.0, None)],
-    # Wooting's current Valorant starting ranges, with WASD pulled toward the fast end (hair-trigger
-    # actuation + a tighter Rapid Trigger step) for quicker reaction; back off toward 0.3/0.3 if it jitters.
-    "valorant": lambda a: [("wasd", 0.15, 0.2), (["lshift"], 1.0, None), (["lctrl"], 0.7, None),
+    # Wooting's current Valorant starting ranges: responsive movement, deliberate utility/jump keys.
+    "valorant": lambda a: [("wasd", 0.3, 0.3), (["lshift"], 1.0, None), (["lctrl"], 0.7, None),
                            (["space"], 2.0, None), (list("cqe"), 1.5, None), (["x"], 2.2, None)],
 }
 
